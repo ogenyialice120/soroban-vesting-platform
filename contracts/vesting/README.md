@@ -53,7 +53,7 @@ Authorization: admin.
 - `"start_time + total_duration overflows u64"` — arithmetic overflow check
 - `"contract is paused"` — contract is paused
 
-**Events:** `("created",)` → `(id: u64, beneficiary: Address, total_amount: i128)`
+**Events:** `("created",)` → `(id: u64, beneficiary: Address, total_amount: i128, token_address: Address)`
 
 ---
 
@@ -123,11 +123,12 @@ Authorization: admin.
 ### `transfer_admin(env, new_admin: Address)`
 
 Transfers the admin role. Requires authorization from both the current admin
-and the `new_admin`.
+and the `new_admin`.  Reads the current admin address before overwriting it so
+the event payload contains both the old and new admin addresses.
 
 Authorization: current admin **and** `new_admin`.
 
-**Events:** `("admXfer",)` → `new_admin: Address`
+**Events:** `("admXfer",)` → `(old_admin: Address, new_admin: Address)`
 
 ---
 
@@ -185,6 +186,26 @@ Read-only; does not extend TTL.
 
 ---
 
+### `get_unvested_amount(env, schedule_id: u64) -> i128`
+
+Returns `total_amount - vested_amount(now)`, clamped to `0`.  Represents the
+amount that would be returned to the recipient if `revoke()` were called at
+this instant.  Returns `0` once the schedule is fully vested.
+Read-only; does not extend TTL.
+
+**Panics:** `"schedule not found"` — schedule ID does not exist
+
+---
+
+### `schedule_exists(env, schedule_id: u64) -> bool`
+
+Returns `true` if a schedule with the given ID exists in storage, `false`
+otherwise.  Lets callers safely probe for schedule existence without catching a
+panic, which is particularly useful when iterating over a range of IDs.
+Read-only; does not extend TTL.
+
+---
+
 ### `extend_ttl(env)`
 
 Permissionless. Extends the contract instance TTL to `INSTANCE_BUMP_LEDGERS`
@@ -233,12 +254,12 @@ See [docs/ttl.md](../../docs/ttl.md).
 
 | Topic | Data | Emitted by |
 |-------|------|-----------|
-| `("created",)` | `(id, beneficiary, total_amount)` | `create_schedule` |
+| `("created",)` | `(id, beneficiary, total_amount, token_address)` | `create_schedule` |
 | `("claimed",)` | `(schedule_id, beneficiary, amount)` | `claim` |
 | `("revoked",)` | `(schedule_id, unvested)` | `revoke` |
 | `("paused",)` | `()` | `pause` |
 | `("unpaused",)` | `()` | `unpause` |
-| `("admXfer",)` | `new_admin` | `transfer_admin` |
+| `("admXfer",)` | `(old_admin, new_admin)` | `transfer_admin` |
 
 ---
 
@@ -253,6 +274,61 @@ vested(now):
 
 where `elapsed = now - start_time`.  
 `saturating_mul` is used to prevent i128 overflow for large amounts × elapsed.
+
+---
+
+## Rounding behavior
+
+`vested_amount` uses integer (floor) division:
+
+```
+elapsed * total_amount / total_duration
+```
+
+Integer division truncates toward zero, so the result is always rounded
+**down** to the nearest whole token unit (stroop / base unit).
+
+### Consequences
+
+1. **Dust accumulates until schedule completion.** At any intermediate
+   timestamp the calculated vested amount may be slightly less than the
+   exact pro-rata share. The "missing" fraction of a token — the *dust* —
+   is not lost; it accumulates in the contract and becomes claimable only
+   when `elapsed >= total_duration`, at which point `vested_amount` returns
+   `total_amount` exactly.
+
+2. **Small totals amplify the effect.** The maximum dust at any point is
+   `total_duration - 1` base units. For a schedule with `total_amount = 1`
+   and `total_duration = 100`, the vested amount is `0` for the first 99
+   seconds and jumps to `1` only at `elapsed == 100`.
+
+3. **This is intentional.** The contract never over-pays; every token
+   locked at creation is eventually paid out in full.
+
+### Worked example
+
+Schedule: `total_amount = 99`, `total_duration = 100 s`, no cliff.
+
+| elapsed (s) | exact pro-rata | `vested_amount` (integer) | dust |
+|-------------|---------------|--------------------------|------|
+| 0 | 0.00 | 0 | 0 |
+| 1 | 0.99 | 0 | 0 |
+| 50 | 49.50 | 49 | 0.5 |
+| 99 | 98.01 | 98 | 0.99 |
+| 100 | 99.00 | 99 *(returns `total_amount`)* | 0 |
+
+At `elapsed = 50` the beneficiary can claim `49` tokens, not `49.5`.
+The remaining `0.5` (truncated to `0` in integer arithmetic) is held in
+the contract until the schedule completes.
+
+### Integrator notes
+
+- Poll `get_claimable` to obtain the exact claimable amount at the current
+  ledger timestamp before calling `claim`.
+- Do not assume `get_claimable` grows by exactly `total_amount / total_duration`
+  per second; some seconds it may grow by 0.
+- The final claim (at or after `start_time + total_duration`) always returns
+  whatever remains in the schedule, guaranteeing no token is permanently stuck.
 
 ---
 

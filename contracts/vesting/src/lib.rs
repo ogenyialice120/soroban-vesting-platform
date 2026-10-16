@@ -321,8 +321,14 @@ impl VestingContract {
         Self::bump_instance(&env);
         Self::require_admin(&env);
         new_admin.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         env.storage().instance().set(&ADMIN, &new_admin);
-        env.events().publish((EVT_ADM_XFER,), new_admin);
+        env.events()
+            .publish((EVT_ADM_XFER,), (old_admin, new_admin));
     }
 
     // ── Read functions ─────────────────────────────────────────────────────
@@ -392,6 +398,45 @@ impl VestingContract {
         env.storage().instance().get(&SCHED_ID).unwrap_or(0)
     }
 
+    /// Return the amount that is still unvested (what would be returned to
+    /// the recipient if `revoke()` were called now).
+    ///
+    /// Computed as `total_amount - vested_amount(schedule, now)`, clamped to
+    /// `0`.  Returns `0` once the schedule is fully vested.
+    /// Read-only — does not extend the TTL or write any state.
+    ///
+    /// # Auth
+    /// None.
+    ///
+    /// # Panics
+    /// - `schedule_id` does not exist (`VestingError::ScheduleNotFound`)
+    pub fn get_unvested_amount(env: Env, schedule_id: u64) -> i128 {
+        let schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Schedule(schedule_id))
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::ScheduleNotFound));
+        let now = env.ledger().timestamp();
+        let vested = VestingContract::vested_amount(&schedule, now);
+        (schedule.total_amount - vested).max(0)
+    }
+
+    /// Return `true` if a schedule with the given ID exists in storage,
+    /// `false` otherwise.
+    ///
+    /// Clients can safely probe for schedule existence without catching a
+    /// panic, which is particularly useful when iterating over a range of IDs.
+    /// Read-only — does not extend the TTL or write any state.
+    ///
+    /// # Auth
+    /// None.
+    pub fn schedule_exists(env: Env, schedule_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+            .is_some()
+    }
+
     /// Extend the contract instance TTL to `INSTANCE_BUMP_LEDGERS`.
     ///
     /// This is a permissionless keep-alive for contracts that are only read
@@ -442,6 +487,7 @@ impl VestingContract {
         let id: u64 = env.storage().instance().get(&SCHED_ID).unwrap_or(0);
         let next_id = id + 1;
 
+        let token_address = params.token_address.clone();
         let schedule = VestingSchedule {
             id: next_id,
             beneficiary: params.beneficiary.clone(),
@@ -483,7 +529,12 @@ impl VestingContract {
 
         env.events().publish(
             (EVT_CREATED,),
-            (next_id, params.beneficiary, params.total_amount),
+            (
+                next_id,
+                params.beneficiary,
+                params.total_amount,
+                token_address,
+            ),
         );
 
         next_id
@@ -527,6 +578,10 @@ impl VestingContract {
             return schedule.total_amount;
         }
         // saturating_mul prevents i128 overflow for very large amounts × elapsed.
+        // Note: integer division truncates toward zero (floor division).
+        // Dust — the fractional remainder — accumulates in the contract and is
+        // only released when elapsed >= total_duration (the branch above).
+        // See README "Rounding behavior" for a worked example.
         i128::from(elapsed).saturating_mul(schedule.total_amount)
             / i128::from(schedule.total_duration)
     }
@@ -856,6 +911,76 @@ mod tests {
 
         let sched = vesting.get_schedule(&id);
         assert_eq!(sched.status, ScheduleStatus::Revoked);
+    }
+
+    // ── revoke before cliff: 0 vested, 100% returned to recipient ────────────
+
+    /// When revoke() is called before the cliff period has elapsed, zero tokens
+    /// have vested.  The entire total_amount must be returned to the recipient
+    /// and the beneficiary receives nothing.
+    ///
+    /// Schedule: cliff_duration=100, total_duration=200, total_amount=100_000.
+    /// Revoke at t = start + 50 (halfway through the cliff, nothing vested).
+    ///
+    /// Expected:
+    ///   - return value == total_amount (100_000)
+    ///   - beneficiary balance == 0
+    ///   - recipient balance == 100_000
+    ///   - schedule.status == ScheduleStatus::Revoked
+    #[test]
+    fn test_revoke_before_cliff() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let recipient = Address::generate(&env); // treasury / unvested-token recipient
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token.clone(),
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 100, // cliff of 100 seconds
+            total_duration: 200,
+        });
+
+        // Advance to t = start + 50 — halfway through the cliff, nothing vested yet.
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+
+        // Verify claimable is 0 before calling revoke.
+        assert_eq!(vesting.get_claimable(&id), 0);
+
+        let returned = vesting.revoke(&id, &recipient);
+
+        // All tokens are unvested → entire amount returned to recipient.
+        assert_eq!(
+            returned, 100_000,
+            "expected all 100_000 returned as unvested"
+        );
+
+        // Beneficiary received nothing (zero vested, zero paid out).
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(
+            token_client.balance(&beneficiary),
+            0,
+            "beneficiary should receive 0 tokens when revoked before cliff"
+        );
+
+        // Recipient received the full unvested amount.
+        assert_eq!(
+            token_client.balance(&recipient),
+            100_000,
+            "recipient should receive full total_amount"
+        );
+
+        // Schedule is marked Revoked.
+        let sched = vesting.get_schedule(&id);
+        assert_eq!(
+            sched.status,
+            ScheduleStatus::Revoked,
+            "schedule status must be Revoked"
+        );
     }
 
     // ── claim after revoke must error with ScheduleNotActive ─────────────────
@@ -1241,7 +1366,7 @@ mod tests {
     //  - balances sum to total_amount (conservation)
     #[test]
     fn test_revoke_cei_state_and_balances() {
-        let (env, vesting_id, admin, beneficiary, funder) = setup();
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
         let token = new_token(&env, &funder, 120_000);
         let vesting = VestingContractClient::new(&env, &vesting_id);
         let treasury = Address::generate(&env);
@@ -1293,6 +1418,7 @@ mod tests {
 
     #[test]
     fn test_event_created() {
+        use soroban_sdk::IntoVal;
         let (env, vesting_id, _admin, beneficiary, funder) = setup();
         let token = new_token(&env, &funder, 100_000);
         let vesting = VestingContractClient::new(&env, &vesting_id);
@@ -1301,23 +1427,28 @@ mod tests {
         let id = vesting.create_schedule(&CreateScheduleParams {
             from: funder.clone(),
             beneficiary: beneficiary.clone(),
-            token_address: token,
+            token_address: token.clone(),
             total_amount: 100_000,
             start_time: start,
             cliff_duration: 0,
             total_duration: 100,
         });
 
-        let events = env.events().all();
-        // Find the "created" event (last one published by vesting contract)
-        let found = !env
-            .events()
-            .all()
-            .filter_by_contract(&vesting_id)
-            .events()
-            .is_empty();
-        assert!(found, "expected 'created' event, got: {:?}", events);
-        let _ = id;
+        // The "created" event must include token_address as the fourth field so
+        // off-chain indexers tracking multiple token types can identify which
+        // token a schedule locks without an extra RPC call.
+        assert_eq!(
+            env.events().all().filter_by_contract(&vesting_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    vesting_id.clone(),
+                    (symbol_short!("created"),).into_val(&env),
+                    (id, beneficiary.clone(), 100_000i128, token.clone()).into_val(&env),
+                )
+            ],
+            "expected 'created' event with (id, beneficiary, total_amount, token_address)"
+        );
     }
 
     // ── events: claim emits "claimed" ─────────────────────────────────────────
@@ -1409,19 +1540,202 @@ mod tests {
 
     #[test]
     fn test_event_transfer_admin() {
-        let (env, vesting_id, _admin, _b, _f) = setup();
+        use soroban_sdk::IntoVal;
+        let (env, vesting_id, old_admin, _b, _f) = setup();
         let vesting = VestingContractClient::new(&env, &vesting_id);
         let new_admin = Address::generate(&env);
 
         vesting.transfer_admin(&new_admin);
 
-        let found = !env
-            .events()
-            .all()
-            .filter_by_contract(&vesting_id)
-            .events()
-            .is_empty();
-        assert!(found, "expected 'admXfer' event");
+        // The event payload must include both old_admin and new_admin so that
+        // off-chain indexers can reconstruct the full admin hand-off chain.
+        //
+        // transfer_admin is the only call here, so the vesting contract emits
+        // exactly one event.  Use the same tuple comparison pattern as the
+        // token contract event tests.
+        assert_eq!(
+            env.events().all().filter_by_contract(&vesting_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    vesting_id.clone(),
+                    (symbol_short!("admXfer"),).into_val(&env),
+                    (old_admin.clone(), new_admin.clone()).into_val(&env),
+                )
+            ]
+        );
+    }
+
+    // ── get_unvested_amount ──────────────────────────────────────────────────
+
+    /// get_unvested_amount returns the correct unvested amount mid-schedule
+    /// and 0 at/after the end.
+    #[test]
+    fn test_get_unvested_amount_mid_schedule_and_at_end() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // At t=0: nothing vested yet, full amount unvested
+        assert_eq!(vesting.get_unvested_amount(&id), 100_000);
+
+        // At t=25: 25_000 vested, 75_000 unvested
+        env.ledger().with_mut(|l| l.timestamp = start + 25);
+        assert_eq!(vesting.get_unvested_amount(&id), 75_000);
+
+        // At t=50: 50_000 vested, 50_000 unvested
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+        assert_eq!(vesting.get_unvested_amount(&id), 50_000);
+
+        // At end (t=100): fully vested, 0 unvested
+        env.ledger().with_mut(|l| l.timestamp = start + 100);
+        assert_eq!(vesting.get_unvested_amount(&id), 0);
+
+        // Past end: still 0
+        env.ledger().with_mut(|l| l.timestamp = start + 200);
+        assert_eq!(vesting.get_unvested_amount(&id), 0);
+    }
+
+    /// get_unvested_amount returns total_amount before the cliff.
+    #[test]
+    fn test_get_unvested_amount_before_cliff() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 50,
+            total_duration: 100,
+        });
+
+        // Before cliff: 0 vested, full amount unvested
+        env.ledger().with_mut(|l| l.timestamp = start + 25);
+        assert_eq!(vesting.get_unvested_amount(&id), 100_000);
+
+        // At cliff: 50_000 vested, 50_000 unvested
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+        assert_eq!(vesting.get_unvested_amount(&id), 50_000);
+    }
+
+    /// get_unvested_amount + get_claimable + claimed_amount == total_amount
+    /// (conservation of tokens at any point during the schedule).
+    #[test]
+    fn test_unvested_plus_claimable_plus_claimed_equals_total() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Claim at t=40
+        env.ledger().with_mut(|l| l.timestamp = start + 40);
+        vesting.claim(&id);
+
+        // Conservation invariant: unvested + claimable + claimed == total
+        let unvested = vesting.get_unvested_amount(&id);
+        let claimable = vesting.get_claimable(&id);
+        let schedule = vesting.get_schedule(&id);
+        assert_eq!(
+            unvested + claimable + schedule.claimed_amount,
+            100_000,
+            "token conservation violated: unvested={unvested} + claimable={claimable} + claimed={} != 100_000",
+            schedule.claimed_amount
+        );
+    }
+
+    // ── schedule_exists ───────────────────────────────────────────────────────
+
+    /// schedule_exists returns true for a created schedule and false for an ID
+    /// that has never been created.
+    #[test]
+    fn test_schedule_exists_true_and_false() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        // Before any schedule: ID 1 does not exist.
+        assert!(
+            !vesting.schedule_exists(&1u64),
+            "schedule_exists should be false before any schedule is created"
+        );
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Existing schedule must return true.
+        assert!(
+            vesting.schedule_exists(&id),
+            "schedule_exists should be true for created schedule"
+        );
+
+        // A never-created ID must return false.
+        assert!(
+            !vesting.schedule_exists(&(id + 1)),
+            "schedule_exists should be false for a non-existent schedule ID"
+        );
+    }
+
+    /// schedule_exists remains true after claim (schedule is Completed, not deleted).
+    #[test]
+    fn test_schedule_exists_after_claim() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Fully claim the schedule.
+        env.ledger().with_mut(|l| l.timestamp = start + 100);
+        vesting.claim(&id);
+
+        // Schedule entry still exists in storage even after completion.
+        assert!(
+            vesting.schedule_exists(&id),
+            "schedule_exists should be true even after the schedule is completed"
+        );
     }
 
     // ── Upgrade 1: vesting arithmetic uses saturating_mul ────────────────────

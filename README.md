@@ -144,9 +144,11 @@ chmod +x scripts/demo-testnet.sh
 cd backend && npm install && npm start
 ```
 
-> **Note:** `make deploy-testnet` and `scripts/deploy.sh` are out of date
-> (old build target, no constructor arguments). Use the `stellar contract`
-> commands below or `docs/testnet-demo.md` instead.
+> **Note:** `make deploy-testnet` is a convenience wrapper around `scripts/deploy.sh`.
+> Constructor arguments must be passed after `--` (e.g. `-- --admin "$ADMIN"`).
+> See [Deploy to Testnet](#deploy-to-testnet) for the full commands with all
+> required constructor arguments, or run `scripts/demo-testnet.sh` for an
+> end-to-end demo.
 
 ---
 
