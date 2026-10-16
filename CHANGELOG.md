@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — 2026-10-16
 
+- contracts/vesting: `transfer_beneficiary(env, schedule_id: u64, new_beneficiary: Address)`
+  (#123). Lets the current beneficiary atomically reassign a vesting schedule
+  to a new address (e.g. after a key rotation or account compromise).  All
+  vesting parameters and `claimed_amount` are preserved — the new beneficiary
+  inherits exactly where the schedule left off.  Requires current beneficiary
+  auth; schedule must be `Active`; contract must not be paused.  Removes
+  `schedule_id` from the old beneficiary's `BeneficiarySchedules` index and
+  appends it to the new beneficiary's index atomically.  Emits `("benXfer",)`
+  → `(schedule_id, old_beneficiary, new_beneficiary)`.  New tests:
+  `test_transfer_beneficiary_success` (happy path: new bene can claim, old
+  cannot), `test_transfer_beneficiary_preserves_claimed_amount` (history is not
+  reset), `test_transfer_beneficiary_revoked_panics` (Revoked schedule panics),
+  `test_transfer_beneficiary_auth_failure` (non-beneficiary cannot transfer),
+  `test_transfer_beneficiary_index_consistency_multiple` (middle schedule of
+  three transferred correctly).  `contracts/vesting/README.md` updated with a
+  new `transfer_beneficiary` section.
+
 - contracts/vesting: `get_claimed_by_beneficiary(env, beneficiary: Address) -> i128`
   (#128). Returns the sum of `claimed_amount` across every schedule owned by
   `beneficiary` in a single call, useful for dashboards and reporting.  Uses

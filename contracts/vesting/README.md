@@ -131,6 +131,27 @@ Authorization: current admin **and** `new_admin`.
 
 ---
 
+### `transfer_beneficiary(env, schedule_id: u64, new_beneficiary: Address)`
+
+Transfers a vesting schedule from its current beneficiary to `new_beneficiary`.
+All vesting parameters and `claimed_amount` are preserved — the new beneficiary
+inherits exactly where the schedule left off. After the call, the new
+beneficiary appears in `get_beneficiary_schedules` and can call `claim`; the
+old beneficiary no longer has the schedule in their index.
+
+The schedule must be `Active`. The contract must not be paused.
+
+Authorization: current beneficiary of the schedule.
+
+**Panics:**
+- `"schedule not found"` — schedule ID does not exist
+- `"schedule is not active"` — schedule is Revoked or Completed
+- `"contract is paused"` — contract is paused
+
+**Events:** `("benXfer",)` → `(schedule_id: u64, old_beneficiary: Address, new_beneficiary: Address)`
+
+---
+
 ### `get_schedule(env, schedule_id: u64) -> VestingSchedule`
 
 Returns the full schedule struct. Read-only; does not extend TTL.
@@ -213,7 +234,7 @@ Pure getters do **not** bump instance TTL.
 | Key | Type | Bumped on |
 |-----|------|-----------|
 | `Schedule(id: u64)` | `VestingSchedule` | `create_schedule`, `claim`, `revoke` |
-| `BeneficiarySchedules(addr: Address)` | `Vec<u64>` | `create_schedule` |
+| `BeneficiarySchedules(addr: Address)` | `Vec<u64>` | `create_schedule`, `transfer_beneficiary` |
 
 ### TTL constants
 
@@ -239,6 +260,7 @@ See [docs/ttl.md](../../docs/ttl.md).
 | `("paused",)` | `()` | `pause` |
 | `("unpaused",)` | `()` | `unpause` |
 | `("admXfer",)` | `new_admin` | `transfer_admin` |
+| `("benXfer",)` | `(schedule_id, old_beneficiary, new_beneficiary)` | `transfer_beneficiary` |
 
 ---
 
