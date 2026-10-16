@@ -129,6 +129,8 @@ and `new_admin`. Not pause-gated.
 
 Authorization: current admin **and** `new_admin`.
 
+**Events:** `("admXfer",)` → `(old_admin: Address, new_admin: Address)`
+
 ---
 
 ### `name(env) -> String`
@@ -238,3 +240,4 @@ See [docs/ttl.md](../../docs/ttl.md).
 | `("approve",)` | `(owner, spender, amount)` | `approve` |
 | `("pause",)` | `()` | `pause` |
 | `("unpause",)` | `()` | `unpause` |
+| `("admXfer",)` | `(old_admin, new_admin)` | `transfer_admin` |

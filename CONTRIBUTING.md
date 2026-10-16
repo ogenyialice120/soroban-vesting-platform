@@ -152,6 +152,13 @@ soroban-vesting-platform/
 
 ---
 
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+By participating you agree to abide by its terms. Report unacceptable behavior
+via the GitHub private security reporting URL:
+https://github.com/unajiogenyi05-hub/soroban-vesting-platform/security
+
 ## Reporting Issues
 
 Use the GitHub issue tracker. Check existing issues before opening a new one. For security vulnerabilities, see [SECURITY.md](SECURITY.md).

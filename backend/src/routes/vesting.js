@@ -15,8 +15,6 @@
  */
 
 const { Router } = require('express');
-const { nativeToScVal, Address, xdr } = require('@stellar/stellar-sdk');
-const { simulateContractCall } = require('../services/stellar');
 const logger = require('../logger');
 
 const router = Router();

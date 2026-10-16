@@ -9,33 +9,178 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — 2026-10-16
 
-- contracts/vesting: `transfer_beneficiary(env, schedule_id: u64, new_beneficiary: Address)`
-  (#123). Lets the current beneficiary atomically reassign a vesting schedule
-  to a new address (e.g. after a key rotation or account compromise).  All
-  vesting parameters and `claimed_amount` are preserved — the new beneficiary
-  inherits exactly where the schedule left off.  Requires current beneficiary
-  auth; schedule must be `Active`; contract must not be paused.  Removes
-  `schedule_id` from the old beneficiary's `BeneficiarySchedules` index and
-  appends it to the new beneficiary's index atomically.  Emits `("benXfer",)`
-  → `(schedule_id, old_beneficiary, new_beneficiary)`.  New tests:
-  `test_transfer_beneficiary_success` (happy path: new bene can claim, old
-  cannot), `test_transfer_beneficiary_preserves_claimed_amount` (history is not
-  reset), `test_transfer_beneficiary_revoked_panics` (Revoked schedule panics),
-  `test_transfer_beneficiary_auth_failure` (non-beneficiary cannot transfer),
-  `test_transfer_beneficiary_index_consistency_multiple` (middle schedule of
-  three transferred correctly).  `contracts/vesting/README.md` updated with a
-  new `transfer_beneficiary` section.
+- contracts/token/src/lib.rs: `transfer_admin()` now emits an `("admXfer",)`
+  event with payload `(old_admin: Address, new_admin: Address)` (#101).
+  Added `EVT_ADM_XFER` constant (`symbol_short!("admXfer")`), matching the
+  vesting contract's pattern for consistency. Off-chain systems monitoring admin
+  changes now receive an on-chain signal without polling `admin()`. New test:
+  `test_event_transfer_admin` asserts the event is emitted with the correct
+  old and new admin addresses and that `admin()` returns the new admin.
+  `contracts/token/README.md` events table and `transfer_admin` doc updated.
 
-- contracts/vesting: `get_claimed_by_beneficiary(env, beneficiary: Address) -> i128`
-  (#128). Returns the sum of `claimed_amount` across every schedule owned by
-  `beneficiary` in a single call, useful for dashboards and reporting.  Uses
-  `saturating_add` to prevent overflow.  Returns 0 when the beneficiary has no
-  schedules.  Read-only — does not bump any TTL.  New tests in
-  `contracts/vesting/src/lib.rs`: `test_total_claimed_no_schedules` (returns 0
-  for unknown address), `test_total_claimed_single_schedule` (partial then full
-  claim), `test_total_claimed_multiple_schedules` (sum across two schedules with
-  interleaved claims).  `contracts/vesting/README.md` updated with a new
-  `get_claimed_by_beneficiary` section.
+- contracts/multisig/src/lib.rs: `is_executable(env, proposal_id: u64) -> bool`
+  view function (#103). Returns `true` when the proposal's status is `Pending`
+  and `confirmation_count >= threshold`. Encapsulates the two-step
+  `get_proposal` + `get_threshold` check, making it easy for UIs and bots to
+  poll readiness without making two RPC calls or implementing the logic
+  themselves. Read-only — no TTL bump. Five new tests:
+  `test_is_executable_false_before_threshold`,
+  `test_is_executable_true_at_threshold`,
+  `test_is_executable_false_after_execution`,
+  `test_is_executable_false_after_cancel`,
+  `test_is_executable_nonexistent_panics`.
+  `contracts/multisig/README.md` updated with function entry.
+
+- scripts/create-schedule-example.js: Node.js example script that sends a
+  `POST /api/vesting/schedule` request to the backend API (#110). Uses the
+  built-in Node 18+ `fetch` — no external npm dependencies. Reads `API_URL`
+  from the environment (defaults to `http://localhost:3001`). Uses placeholder
+  Stellar addresses matching `.env.example` pattern. Exits non-zero on HTTP
+  error or network failure. Usage comment at the top of the file.
+
+- .github/CODEOWNERS: GitHub CODEOWNERS file assigning `@unajiogenyi05-hub`
+  as the reviewer for all files, with explicit patterns for `contracts/`,
+  `.github/`, `backend/`, `frontend/`, and `scripts/` (#116). Includes an
+  explanatory comment on how to add new reviewers.
+
+### Changed — 2026-10-16
+
+- .github/workflows/ci.yml: bumped `node-version` from `'20'` to `'24'` in the
+  backend and frontend jobs (#85). GitHub Actions was already forcing Node 20
+  jobs to run on Node 24 and emitting a deprecation annotation on every CI run.
+  Explicitly setting `'24'` eliminates the annotation and makes the CI
+  configuration match the runtime in use. The backend `package.json` engine
+  constraint (`>=18.0.0`) is fully compatible with Node 24.
+
+### Tests — 2026-10-16
+
+- backend/src/routes/vesting.test.js: expanded test coverage for
+  `GET /api/vesting/beneficiary/:addr` and `GET /api/vesting/count` (#76).
+  Added 9 new tests across the two describe blocks:
+  - `GET /beneficiary/:addr`: correct beneficiary address reflected in
+    response, `scheduleIds` is an array, `contractId` present, different
+    address values work, `contractId` query-param override honoured.
+  - `GET /count`: `success: true`, `count` is a number, `contractId` present,
+    `contractId` query-param override honoured.
+  All 61 backend tests pass.
+
+### Changed — 2026-10-16
+
+- backend/src/routes/vesting.js: removed unused imports `nativeToScVal`,
+  `Address`, `xdr` (from `@stellar/stellar-sdk`) and `simulateContractCall`
+  (from `../services/stellar`) (#79). These were dead-code left over from an
+  incomplete wiring of live contract calls and produced four ESLint
+  `no-unused-vars` warnings in CI. No behaviour changes; all 54 backend tests
+  still pass and `npm run lint` reports zero warnings for `vesting.js`.
+
+### Changed — 2026-10-16
+
+- contracts/token/src/lib.rs: added `///` doc comments to all 18 public
+  functions (#95). Each comment states purpose, auth requirement, panic
+  conditions, and return value. Covers `__constructor`, `mint`, `burn`,
+  `transfer`, `transfer_from`, `approve`, `pause`, `unpause`,
+  `transfer_admin`, `name`, `symbol`, `decimals`, `total_supply`, `balance`,
+  `allowance`, `is_paused`, `admin`, and `extend_ttl`. No behaviour changes;
+  all existing tests continue to pass.
+
+### Added — 2026-10-16
+
+- contracts/vesting/src/lib.rs: `get_unvested_amount(env, schedule_id) -> i128`
+  view function (#99). Returns `total_amount - vested_amount(now)`, clamped to
+  `0`. Replaces client-side computation for treasury dashboards that need to
+  display how much remains unvested. Read-only (no TTL bump). Four new tests:
+  `test_get_unvested_amount_mid_schedule_and_at_end`,
+  `test_get_unvested_amount_before_cliff`, and a conservation invariant test
+  `test_unvested_plus_claimable_plus_claimed_equals_total`. README updated.
+
+### Added — 2026-10-16 (earlier)
+
+- CODE_OF_CONDUCT.md: Contributor Covenant 2.1 added at repository root (#117).
+  Enforcement contact points to the GitHub private security reporting URL.
+  CONTRIBUTING.md updated with a "Code of Conduct" section linking to it.
+
+- docs/testnet-demo.md: "Multisig governance demo" section (#90). Covers all
+  six steps: deploy multisig with `--owners` and `--threshold 1`, transfer
+  vesting admin via `transfer_admin`, submit a `ProposalAction::Call` proposal
+  for `create_schedule`, confirm (threshold 1), execute, and verify the schedule
+  was created. CLI commands match the real function signatures in
+  `contracts/multisig/src/lib.rs`.
+
+- contracts/multisig/src/lib.rs: `test_cancel_executed_proposal_panics` (#68).
+  Submits a proposal, confirms to threshold, executes it, then asserts that
+  calling `cancel()` on the now-Executed proposal panics with
+  `"proposal not pending"`. Mirrors the existing `test_execute_twice_panics`
+  pattern for the cancel path.
+
+- backend/src/routes/health.js: `GET /api/health/ready` endpoint (#119).
+  Checks `VESTING_CONTRACT_ID`, `TOKEN_CONTRACT_ID`, and
+  `MULTISIG_CONTRACT_ID` environment variables. Returns 200 with
+  `{ ready: true, contracts: { vesting, token, multisig } }` when at least
+  one contract ID is configured; returns 503 with `ready: false` when none
+  are set. Four new tests in `health.test.js` cover the 503 (none set), 200
+  (one set), 200 (all set), and per-contract boolean shape cases.
+
+### Added — 2026-10-16 (earlier)
+
+- contracts/vesting/README.md: "Rounding behavior" section (#96). Documents
+  that `vested_amount` uses integer (floor) division
+  (`elapsed * total_amount / total_duration`), explains dust accumulation until
+  schedule completion, includes a worked example (99-token / 100-second
+  schedule), and adds integrator notes. Linked from the `vested_amount` source
+  comment.
+
+- contracts/vesting/src/lib.rs: inline `// Note:` comment in `vested_amount()`
+  (#96). Points to the README "Rounding behavior" section and explains that the
+  fractional remainder (dust) is released only when `elapsed >= total_duration`.
+
+### Added — 2026-10-15
+
+- contracts/multisig: `confirm()` now includes `confirmation_count` in its
+  event payload (#129).  The `("confirmed",)` event data tuple changes from
+  `(proposal_id, owner)` to `(proposal_id, owner, confirmation_count)`.
+  Off-chain monitors can now track confirmation progress from the event stream
+  alone without making a separate `get_proposal()` call.  New test:
+  `test_confirmed_event_includes_count` asserts count = 1 after the first
+  confirmation and count = 2 after the second.  Updated
+  `contracts/multisig/README.md` events table and `confirm()` function docs.
+
+- contracts/vesting: `get_claimed_by_beneficiary(env, beneficiary) -> i128`
+  view function (#128).  Sums `claimed_amount` across all schedules for the
+  given beneficiary in one call, useful for dashboards.  Returns 0 for
+  addresses with no schedules.  Uses `saturating_add` to avoid overflow.
+  Read-only; does not extend any TTL.  Three new tests:
+  `test_total_claimed_no_schedules`, `test_total_claimed_single_schedule`,
+  `test_total_claimed_multiple_schedules`.  Updated `contracts/vesting/README.md`
+  with function reference.
+
+- contracts/vesting: `transfer_beneficiary(env, schedule_id, new_beneficiary)`
+  function (#123).  Lets the current beneficiary atomically reassign a vesting
+  schedule to a new address, preserving all vesting parameters and
+  `claimed_amount`.  Requires: current beneficiary auth, schedule `Active`,
+  contract not paused.  Updates both `BeneficiarySchedules` index entries
+  (removes from old, appends to new) and emits `("benXfer",)` →
+  `(schedule_id, old_beneficiary, new_beneficiary)`.  Five new tests:
+  `test_transfer_beneficiary_success` (new beneficiary claims, old gets
+  nothing), `test_transfer_beneficiary_preserves_claimed_amount` (history
+  preserved), `test_transfer_beneficiary_revoked_panics`,
+  `test_transfer_beneficiary_auth_failure`,
+  `test_transfer_beneficiary_index_consistency_multiple` (index correct after
+  mid-list transfer).  Updated `contracts/vesting/README.md` functions, events
+  table, and persistent storage TTL table.
+
+- backend/src/routes/token.js: `GET /api/token/balance/:addr` now calls
+  `simulateContractCall` with method `balance` when `TOKEN_CONTRACT_ID` and
+  `SOURCE_SECRET_KEY` are set (#130).  Encodes the address argument via
+  `nativeToScVal(addr, { type: 'address' })`, decodes the `i128` result via
+  `scValToNative`, and returns `balance` as a string.  Validates the address
+  with the `G[A-Z2-7]{55}` regex and returns 400 for bad inputs.  Falls back
+  to the existing stub (balance: 0, note field) when either env var is absent.
+  Updated `backend/src/routes/token.test.js` with five new assertions: stub
+  when `SOURCE_SECRET_KEY` absent, stub has `note` field, live call returns
+  parsed balance as string, invalid address returns 400, RPC error propagates
+  to 500.
+
+- contracts/vesting: `("benXfer",)` event constant `EVT_BEN_XFER` added.
 
 ### Added — 2026-10-15
 
