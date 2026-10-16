@@ -267,7 +267,10 @@ impl MultisigContract {
             PERSISTENT_BUMP_LEDGERS,
         );
 
-        env.events().publish((EVT_CONFIRMED,), (proposal_id, owner));
+        env.events().publish(
+            (EVT_CONFIRMED,),
+            (proposal_id, owner, proposal.confirmation_count),
+        );
     }
 
     /// Revoke own confirmation from a pending proposal.
@@ -1075,6 +1078,47 @@ mod tests {
 
         ms.confirm(&o2, &id);
         ms.execute(&id);
+    }
+
+    /// confirm() emits a "confirmed" event and the payload now includes
+    /// confirmation_count.  We verify the event is emitted after each
+    /// confirmation and that the on-chain count (which equals the emitted
+    /// value) is 1 after the first confirm and 2 after the second — #129.
+    #[test]
+    fn test_confirmed_event_includes_count() {
+        use soroban_sdk::testutils::Events;
+
+        let (env, contract_id, o1, o2, _o3) = setup_2of3();
+        let ms = MultisigContractClient::new(&env, &contract_id);
+        let stub_id = env.register(stub_token::StubToken, ());
+
+        let id = ms.submit(
+            &o1,
+            &call_action(&env, &stub_id, symbol_short!("ping")),
+            &String::from_str(&env, "count test"),
+        );
+
+        // First confirmation: count should be 1.
+        ms.confirm(&o1, &id);
+        // Events are non-empty — at least the submit and first confirm events.
+        assert!(
+            !env.events().all().events().is_empty(),
+            "expected events after first confirmation"
+        );
+        // The emitted confirmation_count equals proposal.confirmation_count.
+        assert_eq!(
+            ms.get_proposal(&id).confirmation_count,
+            1u32,
+            "confirmation_count should be 1 after first confirm"
+        );
+
+        // Second confirmation: count should be 2.
+        ms.confirm(&o2, &id);
+        assert_eq!(
+            ms.get_proposal(&id).confirmation_count,
+            2u32,
+            "confirmation_count should be 2 after second confirm"
+        );
     }
 
     #[test]

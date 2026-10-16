@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — 2026-10-15
 
+- contracts/multisig: `confirm()` now includes `confirmation_count` in its
+  event payload (#129).  The `("confirmed",)` event data tuple changes from
+  `(proposal_id, owner)` to `(proposal_id, owner, confirmation_count)`.
+  Off-chain monitors can now track confirmation progress from the event stream
+  alone without making a separate `get_proposal()` call.  New test:
+  `test_confirmed_event_includes_count` asserts count = 1 after the first
+  confirmation and count = 2 after the second.  Updated
+  `contracts/multisig/README.md` events table and `confirm()` function docs.
+
+- contracts/vesting: `get_claimed_by_beneficiary(env, beneficiary) -> i128`
+  view function (#128).  Sums `claimed_amount` across all schedules for the
+  given beneficiary in one call, useful for dashboards.  Returns 0 for
+  addresses with no schedules.  Uses `saturating_add` to avoid overflow.
+  Read-only; does not extend any TTL.  Three new tests:
+  `test_total_claimed_no_schedules`, `test_total_claimed_single_schedule`,
+  `test_total_claimed_multiple_schedules`.  Updated `contracts/vesting/README.md`
+  with function reference.
+
+- contracts/vesting: `transfer_beneficiary(env, schedule_id, new_beneficiary)`
+  function (#123).  Lets the current beneficiary atomically reassign a vesting
+  schedule to a new address, preserving all vesting parameters and
+  `claimed_amount`.  Requires: current beneficiary auth, schedule `Active`,
+  contract not paused.  Updates both `BeneficiarySchedules` index entries
+  (removes from old, appends to new) and emits `("benXfer",)` →
+  `(schedule_id, old_beneficiary, new_beneficiary)`.  Five new tests:
+  `test_transfer_beneficiary_success` (new beneficiary claims, old gets
+  nothing), `test_transfer_beneficiary_preserves_claimed_amount` (history
+  preserved), `test_transfer_beneficiary_revoked_panics`,
+  `test_transfer_beneficiary_auth_failure`,
+  `test_transfer_beneficiary_index_consistency_multiple` (index correct after
+  mid-list transfer).  Updated `contracts/vesting/README.md` functions, events
+  table, and persistent storage TTL table.
+
+- backend/src/routes/token.js: `GET /api/token/balance/:addr` now calls
+  `simulateContractCall` with method `balance` when `TOKEN_CONTRACT_ID` and
+  `SOURCE_SECRET_KEY` are set (#130).  Encodes the address argument via
+  `nativeToScVal(addr, { type: 'address' })`, decodes the `i128` result via
+  `scValToNative`, and returns `balance` as a string.  Validates the address
+  with the `G[A-Z2-7]{55}` regex and returns 400 for bad inputs.  Falls back
+  to the existing stub (balance: 0, note field) when either env var is absent.
+  Updated `backend/src/routes/token.test.js` with five new assertions: stub
+  when `SOURCE_SECRET_KEY` absent, stub has `note` field, live call returns
+  parsed balance as string, invalid address returns 400, RPC error propagates
+  to 500.
+
+- contracts/vesting: `("benXfer",)` event constant `EVT_BEN_XFER` added.
+
+### Added — 2026-10-15
+
 - contracts/vesting: `batch_create_schedule(env, params: Vec<CreateScheduleParams>) -> Vec<u64>`
   (#122). Creates multiple vesting schedules atomically in a single transaction.
   Requires admin auth; contract must not be paused; `params` must be non-empty

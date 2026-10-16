@@ -79,7 +79,7 @@ Authorization: `owner` (must be an owner).
 - `"already confirmed"` — `owner` has already confirmed this proposal
 - `"not an owner"` — `owner` is not in the owner set
 
-**Events:** `("confirmed",)` → `(proposal_id: u64, owner: Address)`
+**Events:** `("confirmed",)` → `(proposal_id: u64, owner: Address, confirmation_count: u32)`
 
 ---
 
@@ -238,7 +238,7 @@ See [docs/ttl.md](../../docs/ttl.md).
 | Topic | Data | Emitted by |
 |-------|------|-----------|
 | `("submitted",)` | `(id, proposer)` | `submit` |
-| `("confirmed",)` | `(proposal_id, owner)` | `confirm` |
+| `("confirmed",)` | `(proposal_id, owner, confirmation_count)` | `confirm` |
 | `("revoked",)` | `(proposal_id, owner)` | `revoke_confirmation` |
 | `("executed",)` | `proposal_id` | `execute` |
 | `("cancelled",)` | `proposal_id` | `cancel` |
