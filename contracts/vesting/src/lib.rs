@@ -351,6 +351,32 @@ impl VestingContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Return the sum of all `claimed_amount` values across every schedule
+    /// for `beneficiary`.  Useful for dashboards that need a single total
+    /// without iterating individual schedules off-chain.
+    ///
+    /// Returns 0 when the beneficiary has no schedules.
+    ///
+    /// Read-only: does **not** extend any TTL.
+    pub fn get_claimed_by_beneficiary(env: Env, beneficiary: Address) -> i128 {
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BeneficiarySchedules(beneficiary))
+            .unwrap_or(Vec::new(&env));
+
+        let mut total: i128 = 0;
+        for id in ids.iter() {
+            let schedule: VestingSchedule = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Schedule(id))
+                .unwrap_or_else(|| panic_with_error!(&env, VestingError::ScheduleNotFound));
+            total = total.saturating_add(schedule.claimed_amount);
+        }
+        total
+    }
+
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
@@ -1089,6 +1115,96 @@ mod tests {
         assert_eq!(ids.get(0).unwrap(), id1);
         assert_eq!(ids.get(1).unwrap(), id2);
         assert_eq!(ids.get(2).unwrap(), id3);
+    }
+
+    // ── get_total_claimed_for_beneficiary (#128) ──────────────────────────────
+
+    /// Returns 0 for an address with no schedules.
+    #[test]
+    fn test_total_claimed_no_schedules() {
+        let (env, vesting_id, _admin, _beneficiary, _funder) = setup();
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let stranger = Address::generate(&env);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&stranger), 0);
+    }
+
+    /// Returns the claimed amount for a single schedule after a partial claim.
+    #[test]
+    fn test_total_claimed_single_schedule() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Before any claim: total claimed = 0
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 0);
+
+        // Claim at t=50: 50_000 claimed
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+        vesting.claim(&id);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 50_000);
+
+        // Claim remainder at t=100: 100_000 total claimed
+        env.ledger().with_mut(|l| l.timestamp = start + 100);
+        vesting.claim(&id);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 100_000);
+    }
+
+    /// Returns the sum across multiple schedules.
+    #[test]
+    fn test_total_claimed_multiple_schedules() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 300_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id1 = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token.clone(),
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+        let id2 = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token.clone(),
+            total_amount: 200_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Claim from schedule 1 at t=50: 50_000 claimed
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+        vesting.claim(&id1);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 50_000);
+
+        // Claim from schedule 2 at t=50: 100_000 + 50_000 = 150_000 total
+        vesting.claim(&id2);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 150_000);
+
+        // Fully claim schedule 1 at t=100
+        env.ledger().with_mut(|l| l.timestamp = start + 100);
+        vesting.claim(&id1);
+        // schedule 1 claimed_amount is now 100_000; schedule 2 still 100_000
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 200_000);
+
+        // Fully claim schedule 2 at t=100
+        vesting.claim(&id2);
+        assert_eq!(vesting.get_claimed_by_beneficiary(&beneficiary), 300_000);
     }
 
     // ── double-revoke must error with ScheduleNotActive ───────────────────────

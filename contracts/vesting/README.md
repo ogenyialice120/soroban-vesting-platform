@@ -155,6 +155,15 @@ if no schedules exist. Read-only; does not extend TTL.
 
 ---
 
+### `get_claimed_by_beneficiary(env, beneficiary: Address) -> i128`
+
+Returns the sum of `claimed_amount` across all schedules owned by
+`beneficiary`. Useful for dashboards that need a single aggregate without
+iterating individual schedules off-chain. Returns 0 when the beneficiary has
+no schedules. Read-only; does not extend TTL.
+
+---
+
 ### `get_admin(env) -> Address`
 
 Returns the current admin address. Read-only; does not extend TTL.

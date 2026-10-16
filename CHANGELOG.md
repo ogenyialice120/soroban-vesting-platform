@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-10-16
+
+- contracts/vesting: `get_claimed_by_beneficiary(env, beneficiary: Address) -> i128`
+  (#128). Returns the sum of `claimed_amount` across every schedule owned by
+  `beneficiary` in a single call, useful for dashboards and reporting.  Uses
+  `saturating_add` to prevent overflow.  Returns 0 when the beneficiary has no
+  schedules.  Read-only — does not bump any TTL.  New tests in
+  `contracts/vesting/src/lib.rs`: `test_total_claimed_no_schedules` (returns 0
+  for unknown address), `test_total_claimed_single_schedule` (partial then full
+  claim), `test_total_claimed_multiple_schedules` (sum across two schedules with
+  interleaved claims).  `contracts/vesting/README.md` updated with a new
+  `get_claimed_by_beneficiary` section.
+
 ### Added — 2026-10-15
 
 - contracts/vesting: `batch_create_schedule(env, params: Vec<CreateScheduleParams>) -> Vec<u64>`
